@@ -1,0 +1,55 @@
+# Large data files
+data/cache/
+data/raw/*.csv
+data/raw/*.parquet
+data/raw/*.npy
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model checkpoints and logs
+*.ckpt
+*.pth
+*.h5
+logs/
+checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
