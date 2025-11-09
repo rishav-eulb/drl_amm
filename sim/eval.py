@@ -37,7 +37,12 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Tuple, Optional
 import numpy as np
 
-from amm.math import (
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+from amm.maths import (
     clip01,
     divergence_loss,
     slippage_loss_X,

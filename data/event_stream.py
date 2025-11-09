@@ -94,18 +94,33 @@ def make_events(v: np.ndarray, beta_v: float) -> List[Event]:
 
 
 def build_windows(series: np.ndarray, win: int) -> np.ndarray:
-    """Build fixed-length windows for LSTM from a regular-interval series.
-    Returns shape [N, win], where N = len(series) - win + 1.
+    """
+    Build fixed-length windows.
+    - If series is 1-D [T] -> returns [N, win]
+    - If series is 2-D [T, D] -> returns [N, win, D]
+    where N = T - win + 1.
     """
     x = np.asarray(series, dtype=float)
-    assert x.ndim == 1, "series must be 1-D"
     assert win >= 2, "window must be >= 2"
 
-    N = len(x) - win + 1
-    if N <= 0:
-        return np.zeros((0, win), dtype=float)
-    out = np.lib.stride_tricks.sliding_window_view(x, win_shape := win)
-    return out.copy()
+    if x.ndim == 1:
+        N = len(x) - win + 1
+        if N <= 0:
+            return np.zeros((0, win), dtype=float)
+        out = np.lib.stride_tricks.sliding_window_view(x, win_shape := win)
+        return out.copy()
+
+    elif x.ndim == 2:
+        T, D = x.shape
+        N = T - win + 1
+        if N <= 0:
+            return np.zeros((0, win, D), dtype=float)
+        out = np.lib.stride_tricks.sliding_window_view(x, (win, D))
+        out = out.reshape(T - win + 1, win, D)
+        return out.copy()
+
+    else:
+        raise AssertionError("series must be 1-D or 2-D")
 
 
 def align_features(features: Dict[str, np.ndarray]) -> np.ndarray:
@@ -137,45 +152,37 @@ def scale_minmax(X: np.ndarray, clip: Tuple[float, float] = (0.0, 1.0)) -> np.nd
 
 # ------------------------------ High-level dataset ------------------------------
 
-def make_event_dataset(
-    v: np.ndarray,
-    tau: np.ndarray,
-    beta_v: float,
-    *,
-    lstm_win: int = 50,
-    lookahead: int = 1,
-) -> Dict[str, np.ndarray | List[Event]]:
-    """Create an event-driven dataset with LSTM windows and next-step targets.
-
-    Parameters
-    ----------
-    v : valuation series in (0,1), shape [T]
-    tau : auxiliary feature series, either shape [T] (1-D) or [T, D]
-    beta_v : event threshold on |Δv|
-    lstm_win : LSTM window length (e.g., 50)
-    lookahead : steps ahead for the supervised target (e.g., 1)
+def make_event_dataset(v, tau, beta_v=0.01, lstm_win=50, lookahead=1):
     """
-    v = clip01(np.asarray(v, dtype=float))
-    tau = np.asarray(tau, dtype=float)
-    if tau.ndim == 1:
-        tau = tau[:, None]
-    assert v.ndim == 1 and tau.ndim == 2 and len(v) == len(tau)
+    v: 1-D valuation array
+    tau: 2-D array or None
+    """
+    v = np.asarray(v, dtype=float)
 
-    # 1) build windows for LSTM inputs: concatenate [v, tau]
-    feats = np.concatenate([v[:, None], tau], axis=1)
-    feats = scale_minmax(feats)
-    Xseq = build_windows(feats, lstm_win)  # [N, win, D]
+    # Feature frame construction
+    if tau is not None:
+        tau = np.asarray(tau, dtype=float)
+        feats = np.concatenate([v[:, None], tau], axis=1)
+    else:
+        feats = v[:, None]
 
-    # 2) supervised targets: next valuation (or k-step ahead)
-    y = v[lstm_win - 1 + lookahead :]
-    N = min(len(Xseq), len(y))
-    Xseq = Xseq[:N]
-    y = y[:N]
+    # Build windows (safe for 1-D or 2-D)
+    Xwin = build_windows(feats, lstm_win)
+    # Xwin has shape [N, lstm_win, D]
 
-    # 3) event list based on valuations (whole series)
-    events = make_events(v, beta_v)
+    # Build event stream (using |Δv| > beta_v threshold)
+    dv = np.abs(np.diff(v))
+    idx = np.where(dv > beta_v)[0] + 1  # shift to next index
 
-    return {"events": events, "X_lstm": Xseq, "y_val": y, "v": v, "tau": tau}
+    events = []
+    for i in idx:
+        events.append(Event(t=int(i), v=float(v[i]), dv=float(dv[i-1])))
+
+    return {
+        "events": events,
+        "Xwin": Xwin,
+        "feats": feats,
+    }
 
 # ------------------------------ Self-test ---------------------------------------
 if __name__ == "__main__":

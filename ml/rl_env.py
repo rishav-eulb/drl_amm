@@ -53,7 +53,7 @@ from dataclasses import dataclass, asdict
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
-from amm.math import expected_load, clip01
+from amm.maths import expected_load, clip01
 from amm.camm import ConfigurableAMM
 from data.event_stream import Event
 
