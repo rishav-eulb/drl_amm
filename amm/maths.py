@@ -94,7 +94,7 @@ def cap_at_equilibrium(v: float, c: float) -> float:
     """Capitalization at equilibrium Φ(v)."""
     x, y = Phi(v, c)
     return cap_xy_v(x, y, v)
-d
+
 
 # ---------- Divergence loss ----------------------------------------------------
 
