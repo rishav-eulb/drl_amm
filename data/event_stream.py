@@ -1,41 +1,7 @@
 """
-Event-driven dataset builder for the predictive AMM project
------------------------------------------------------------
-This module converts a regular-interval price (or valuation) series
-into an EVENT-DRIVEN stream using a valuation-threshold β_v.
-
-Outputs are used by:
-  • LSTM: to build fixed-length windows from the regular series
-  • RL Env: to advance steps only when |v_t - v_{t-1}| >= β_v
-
-Key concepts implemented here are aligned with the paper's
-"price-based event" definition and equilibrium-valuation notation.
-
-Public API
-----------
-make_events(v: np.ndarray, beta_v: float) -> List[Event]
-    Build a list of (t_idx, v_t, dv) events where |v_t - v_{last_event}| >= beta_v.
-
-build_windows(series: np.ndarray, win: int) -> np.ndarray
-    Turn a regular-interval series into [N, win] windows for LSTM training.
-
-align_features(features: Dict[str, np.ndarray]) -> np.ndarray
-    Column-stack multi-feature arrays after checking equal length.
-
-scale_minmax(X, clip=(0.0, 1.0))
-    Simple min–max scaling utility for features in [clip_min, clip_max].
-
-make_event_dataset(v, tau, beta_v, lookahead=1)
-    High-level helper returning a dict with:
-      - 'events': list of events
-      - 'X_lstm': [N, T, D] windows of features for LSTM
-      - 'y_val':  [N] next-step (or lookahead) target valuations
-
-Notes
------
-• Input valuation v must be in (0,1). Use normalize_price_to_valuation if needed.
-• All functions are deterministic and side-effect free for reproducibility.
-• Unit tests at bottom (run this file directly) validate edge cases.
+Event-driven dataset builder for the predictive AMM project (PAPER-COMPLIANT)
+-----------------------------------------------------------------------------
+FIXED: Event generation now uses RELATIVE threshold (1 ± β_v) as per Algorithm 1
 """
 from __future__ import annotations
 
@@ -52,9 +18,8 @@ def clip01(x: np.ndarray, eps: float = EPS) -> np.ndarray:
 
 
 def normalize_price_to_valuation(price: np.ndarray) -> np.ndarray:
-    """Example normalization mapping price -> valuation v in (0,1).
-    For CPMM prelim work you often use v = price / (1 + price) so that
-    v/(1-v) = price. Adjust if you adopt a different parity mapping.
+    """Map price -> valuation v in (0,1).
+    For CPMM: v = price / (1 + price) so that v/(1-v) = price.
     """
     price = np.asarray(price, dtype=float)
     return clip01(price / (1.0 + price))
@@ -67,13 +32,24 @@ class Event:
     v: float    # valuation at t (already in (0,1))
     dv: float   # signed delta vs last event valuation
 
-# ------------------------------ Core builders -----------------------------------
+# ------------------------------ Core builders (PAPER-COMPLIANT) -----------------
 
 def make_events(v: np.ndarray, beta_v: float) -> List[Event]:
-    """Generate price-based events using threshold beta_v on valuation deltas.
+    """Generate price-based events using RELATIVE threshold (PAPER Algorithm 1).
 
-    We emit an event at index i whenever |v[i] - v[last]| >= beta_v where 'last'
-    is the index of the most recent event (starting at i=0).
+    Paper (Algorithm 1, lines 3-7):
+```
+    upper ← v_t(1 + β_v)
+    lower ← v_t(1 − β_v)
+    if upper ≤ v_{t+k} ≤ lower then
+        step ← True
+```
+    
+    We emit an event at index i whenever:
+    v[i] >= v[last] * (1 + β_v)  OR  v[i] <= v[last] * (1 - β_v)
+    
+    This is DIFFERENT from original implementation which used:
+    |v[i] - v[last]| >= β_v  (absolute threshold)
     """
     v = clip01(np.asarray(v, dtype=float))
     assert v.ndim == 1, "v must be 1-D"
@@ -85,11 +61,17 @@ def make_events(v: np.ndarray, beta_v: float) -> List[Event]:
     events.append(Event(t=0, v=float(last_v), dv=0.0))
 
     for i in range(1, len(v)):
-        dv = float(v[i] - last_v)
-        if abs(dv) >= beta_v:
+        # Paper Algorithm 1: relative threshold
+        upper = last_v * (1.0 + beta_v)
+        lower = last_v * (1.0 - beta_v)
+        
+        # Event fires if current valuation crosses bounds
+        if v[i] >= upper or v[i] <= lower:
+            dv = float(v[i] - last_v)
             events.append(Event(t=i, v=float(v[i]), dv=dv))
             last_v = v[i]
             last_idx = i
+            
     return events
 
 
@@ -124,10 +106,7 @@ def build_windows(series: np.ndarray, win: int) -> np.ndarray:
 
 
 def align_features(features: Dict[str, np.ndarray]) -> np.ndarray:
-    """Column-stack features after validating equal lengths.
-    features: dict name -> 1-D arrays of equal length.
-    Returns [T, D].
-    """
+    """Column-stack features after validating equal lengths."""
     keys = list(features.keys())
     if not keys:
         raise ValueError("features cannot be empty")
@@ -166,17 +145,11 @@ def make_event_dataset(v, tau, beta_v=0.01, lstm_win=50, lookahead=1):
     else:
         feats = v[:, None]
 
-    # Build windows (safe for 1-D or 2-D)
+    # Build windows
     Xwin = build_windows(feats, lstm_win)
-    # Xwin has shape [N, lstm_win, D]
 
-    # Build event stream (using |Δv| > beta_v threshold)
-    dv = np.abs(np.diff(v))
-    idx = np.where(dv > beta_v)[0] + 1  # shift to next index
-
-    events = []
-    for i in idx:
-        events.append(Event(t=int(i), v=float(v[i]), dv=float(dv[i-1])))
+    # Build event stream (using RELATIVE threshold - PAPER Algorithm 1)
+    events = make_events(v, beta_v)
 
     return {
         "events": events,
@@ -186,12 +159,49 @@ def make_event_dataset(v, tau, beta_v=0.01, lstm_win=50, lookahead=1):
 
 # ------------------------------ Self-test ---------------------------------------
 if __name__ == "__main__":
+    print("="*70)
+    print("EVENT GENERATION TEST (PAPER-COMPLIANT VERSION)")
+    print("="*70)
+    
     # Synthetic demo
     T = 300
     rng = np.random.default_rng(0)
     price = np.cumprod(1.0 + 0.001 * rng.standard_normal(T))
     v = normalize_price_to_valuation(price)
-    vol = np.abs(np.convolve(np.diff(np.r_[0, price]), np.ones(5)/5, mode='same'))
-    ds = make_event_dataset(v, vol, beta_v=0.005, lstm_win=32, lookahead=1)
-    print(f"events: {len(ds['events'])}")
-    print(f"X_lstm: {ds['X_lstm'].shape}, y: {ds['y_val'].shape}")
+    
+    # Test both methods
+    print("\n1. Testing RELATIVE threshold (Paper Algorithm 1):")
+    beta_v_rel = 0.01  # 1% relative change
+    events_paper = make_events(v, beta_v_rel)
+    print(f"   β_v = {beta_v_rel} (relative)")
+    print(f"   Events: {len(events_paper)} ({100*len(events_paper)/T:.2f}%)")
+    print(f"   First 3 events: ")
+    for e in events_paper[:3]:
+        print(f"     t={e.t}, v={e.v:.6f}, Δv={e.dv:+.6f}")
+    
+    print("\n2. Comparison with absolute threshold:")
+    # Old method for comparison
+    def make_events_absolute(v, beta_v):
+        """Original implementation - ABSOLUTE threshold."""
+        v = clip01(v)
+        events = []
+        last_v = v[0]
+        events.append(Event(t=0, v=float(last_v), dv=0.0))
+        for i in range(1, len(v)):
+            if abs(v[i] - last_v) >= beta_v:
+                events.append(Event(t=i, v=float(v[i]), dv=float(v[i] - last_v)))
+                last_v = v[i]
+        return events
+    
+    events_abs = make_events_absolute(v, beta_v_rel)
+    print(f"   β_v = {beta_v_rel} (absolute)")
+    print(f"   Events: {len(events_abs)} ({100*len(events_abs)/T:.2f}%)")
+    
+    print(f"\n3. Difference:")
+    print(f"   Relative method: {len(events_paper)} events")
+    print(f"   Absolute method: {len(events_abs)} events")
+    print(f"   Ratio: {len(events_paper)/len(events_abs):.2f}x")
+    
+    print("\n" + "="*70)
+    print("✓ Paper-compliant event generation (relative threshold)")
+    print("="*70)

@@ -500,11 +500,13 @@ def main():
     window_init = Xn[-args.lstm_win:, :]
     
     def lstm_pred_fn(win_np: np.ndarray) -> float:
-        if win_np.ndim != 2:
-            raise ValueError(f"lstm_pred_fn expects [T,D], got {win_np.shape}")
-        w = win_np[None, :, :].astype(np.float32)
-        out = lstm_predict(model, w)
-        return float(np.clip(out[0], 1e-6, 1.0 - 1e-6))
+       """LSTM predictor that handles augmented windows with ε column."""
+       if win_np.ndim != 2:
+        raise ValueError(f"lstm_pred_fn expects [T,D], got {win_np.shape}")
+       # Window now has ε as last column from env._augment_window_with_epsilon
+       w = win_np[None, :, :].astype(np.float32)
+       out = lstm_predict(model, w)
+       return float(np.clip(out[0], 1e-6, 1.0 - 1e-6))
     
     p0 = float(price[0])
     y0 = 100_000.0
@@ -513,21 +515,21 @@ def main():
     print(f"       Initial: x={x0:.2f}, y={y0:.2f}, c={x0*y0:.2e}\n")
     
     cfg_rl = RLEnvConfig(
-        beta_c=args.beta_c, 
-        sigma_noise=0.02,
-        sigma_liq=args.sigma_liq,        # NEW: Gaussian liquidity width
-        num_positions=args.num_positions, # NEW: Number of V3 positions
-        samples_per_step=16,
-        lstm_win=args.lstm_win, 
-        seed=args.seed,
-        use_concentrated_liquidity=True,  # NEW: Enable V3 mode
-    )
+    beta_c=args.beta_c, 
+    sigma_noise=0.02,
+    mu_epsilon=0.0,        # NEW: ε distribution params
+    sigma_epsilon=0.1,     # NEW
+    samples_per_step=16,
+    lstm_win=args.lstm_win, 
+    seed=args.seed,
+    use_concentrated_liquidity=False,  # Disable V3 for paper-compliant version
+)
     
     train_env = RLEnv(cfg_rl, train_events, camm_init, lstm_pred_fn, window_init)
 
     print("[7/11] Training DD-DQN agent...")
     agent = DDQNAgent(
-        state_dim=6,  # FIXED: was 5, now 6 (v, vpred, expL, x, y, liq_util)
+        state_dim=7,  # FIXED: was 5, now 6 (v, vpred, expL, x, y, liq_util)
         n_actions=2,
         cfg=DDQNConfig(
             gamma=args.rl_gamma, lr=1e-3, hidden=128, batch_size=256,

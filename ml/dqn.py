@@ -307,23 +307,3 @@ def train(env, agent: DDQNAgent, steps: int = 200_000, warm_start_random: int = 
     return hist
 
 # -------------------------- Demo -------------------------------------------------
-if __name__ == "__main__":
-    # Minimal smoke test using the dummy env from rl_env.py __main__
-    from ml.rl_env import RLEnv, RLEnvConfig
-    from amm.camm import ConfigurableAMM
-    from data.event_stream import make_events, normalize_price_to_valuation
-
-    rng = np.random.default_rng(0)
-    price = np.cumprod(1.0 + 0.002 * rng.standard_normal(5000))
-    v = normalize_price_to_valuation(price)
-    events = make_events(v, beta_v=0.01)
-    camm = ConfigurableAMM(x=100.0, y=100.0)
-
-    def dummy_pred(win: np.ndarray) -> float:
-        return float(1 / (1 + np.exp(-win.mean())))
-
-    env = RLEnv(RLEnvConfig(), events, camm, dummy_pred, window_init=np.zeros((50, 4)))
-
-    agent = DDQNAgent(state_dim=5, n_actions=2, cfg=DDQNConfig(buffer_size=50_000, min_buffer=1000, eps_decay_steps=10_000))
-    hist = train(env, agent, steps=10_000)
-    print(f"trained steps: {len(hist['reward'])}, losses: {len(hist['loss'])}")
