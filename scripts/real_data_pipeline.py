@@ -1,13 +1,13 @@
 """
-End‑to‑end training & evaluation on REAL market data (COMPLETE + CORRECTED)
-===========================================================================
-This script implements the paper's specifications exactly with PROPER evaluation:
+End‑to‑end training & evaluation on REAL market data (V3 VERSION)
+=================================================================
+This script implements the paper's specifications with V3 concentrated liquidity:
 - Proper β_c threshold for rewards
 - Correct LSTM hyperparameters (Table 1)
 - Proper event generation (1-5% of data)
 - Train/test split for events
+- V3 concentrated liquidity with Gaussian repositioning
 - Evaluation on test set with greedy policy
-- Deployment of trained predictive AMM
 - Side-by-side comparison: Proposed vs Baseline
 
 Paper: "Predictive crypto-asset automated market maker architecture for 
@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -131,7 +131,7 @@ def choose_optimal_beta_v(
     
     # If too many events, relax
     if actual_events > len(v) * 0.05:
-        print(f"[Event Threshold] Too many events (>{5}%), adjusting...")
+        print(f"[Event Threshold] Too many events (>5%), adjusting...")
         q_new = min(0.99, q + 0.05)
         beta_try = float(np.quantile(dv, q_new))
         beta_try = max(beta_try, 1e-9)
@@ -154,19 +154,11 @@ def split_events_train_test(events: List[Event], train_ratio: float = 0.8) -> Tu
 
 
 # ============================================================================
-# EVALUATION FUNCTIONS (NEW!)
+# EVALUATION FUNCTIONS
 # ============================================================================
 
 def evaluate_rl_policy(env: RLEnv, agent: DDQNAgent, max_steps: int = 10000) -> Dict:
-    """
-    Evaluate trained policy on test environment (greedy, no exploration).
-    
-    Returns metrics:
-    - mean_reward
-    - positive_ratio
-    - mean_loss
-    - action distribution
-    """
+    """Evaluate trained policy on test environment (greedy, no exploration)."""
     # Save original epsilon
     old_eps_start = agent.cfg.eps_start
     old_eps_end = agent.cfg.eps_end
@@ -184,7 +176,6 @@ def evaluate_rl_policy(env: RLEnv, agent: DDQNAgent, max_steps: int = 10000) -> 
     step = 0
     
     while not done and step < max_steps:
-        # Greedy action
         action = agent.act(obs)
         obs, reward, done, info = env.step(action)
         
@@ -230,15 +221,7 @@ def simulate_predictive_amm(
     window_init: np.ndarray,
     rl_config: RLEnvConfig,
 ) -> PredictiveAMMResult:
-    """
-    Simulate the predictive AMM on test data.
-    
-    Deploys:
-    1. LSTM for v'_p predictions
-    2. DQN agent for action selection (greedy)
-    3. Pseudo-arbitrage shifts
-    """
-    # Create test environment
+    """Simulate the predictive AMM on test data."""
     test_camm = ConfigurableAMM(x=camm_init.x, y=camm_init.y, name="test_predictive_amm")
     
     def lstm_pred_fn(win: np.ndarray) -> float:
@@ -312,7 +295,6 @@ def compute_proposed_amm_metrics(
     initial_c: float,
 ) -> Dict:
     """Compute metrics for proposed AMM."""
-    # Divergence/slippage/load per step
     divs = []
     slips = []
     loads = []
@@ -324,10 +306,7 @@ def compute_proposed_amm_metrics(
         slips.append(slippage_loss_X(v1, v2, initial_c))
         loads.append(load_auto(v1, v2, initial_c))
     
-    # Drift magnitude
     drift_mag = np.sqrt(result.drift_x[-1]**2 + result.drift_y[-1]**2)
-    
-    # Prediction accuracy
     pred_mae = float(np.mean(np.abs(result.predictions - result.valuations)))
     
     return {
@@ -356,7 +335,7 @@ def print_comparison_table(
     print("│ Metric                  │  Baseline   │  Proposed   │  Δ Change  │")
     print("├─────────────────────────┼─────────────┼─────────────┼────────────┤")
     
-    # Utilization (if available)
+    # Utilization
     base_util = baseline_metrics.get('utilization', 0)
     prop_util = proposed_metrics.get('utilization', 0)
     if base_util > 0:
@@ -403,7 +382,7 @@ def print_comparison_table(
 # ============================================================================
 
 def main():
-    ap = argparse.ArgumentParser(description="Complete DRL-AMM training + evaluation pipeline")
+    ap = argparse.ArgumentParser(description="Complete DRL-AMM training + evaluation pipeline (V3)")
     
     # Data
     ap.add_argument("--csv", required=True, help="Path to 1m OHLCV CSV")
@@ -427,6 +406,10 @@ def main():
     ap.add_argument("--rl_buffer", type=int, default=100_000)
     ap.add_argument("--rl_gamma", type=float, default=0.98)
     ap.add_argument("--rl_eps_decay", type=int, default=50_000)
+    
+    # V3 Parameters (NEW)
+    ap.add_argument("--sigma_liq", type=float, default=0.05, help="Gaussian liquidity width")
+    ap.add_argument("--num_positions", type=int, default=5, help="Number of concentrated positions")
     
     # Evaluation
     ap.add_argument("--train_ratio", type=float, default=0.8, help="Train/test split ratio")
@@ -530,15 +513,22 @@ def main():
     print(f"       Initial: x={x0:.2f}, y={y0:.2f}, c={x0*y0:.2e}\n")
     
     cfg_rl = RLEnvConfig(
-        beta_c=args.beta_c, sigma_noise=0.02, samples_per_step=16,
-        lstm_win=args.lstm_win, seed=args.seed,
+        beta_c=args.beta_c, 
+        sigma_noise=0.02,
+        sigma_liq=args.sigma_liq,        # NEW: Gaussian liquidity width
+        num_positions=args.num_positions, # NEW: Number of V3 positions
+        samples_per_step=16,
+        lstm_win=args.lstm_win, 
+        seed=args.seed,
+        use_concentrated_liquidity=True,  # NEW: Enable V3 mode
     )
     
     train_env = RLEnv(cfg_rl, train_events, camm_init, lstm_pred_fn, window_init)
 
     print("[7/11] Training DD-DQN agent...")
     agent = DDQNAgent(
-        state_dim=5, n_actions=2,
+        state_dim=6,  # FIXED: was 5, now 6 (v, vpred, expL, x, y, liq_util)
+        n_actions=2,
         cfg=DDQNConfig(
             gamma=args.rl_gamma, lr=1e-3, hidden=128, batch_size=256,
             buffer_size=args.rl_buffer, min_buffer=5_000,
@@ -561,7 +551,7 @@ def main():
     print(f"       Positive %: {positive_ratio:.2%}\n")
 
     # ========================================================================
-    # 7. EVALUATE TRAINED POLICY ON TEST SET (NEW!)
+    # 7. EVALUATE TRAINED POLICY ON TEST SET
     # ========================================================================
     print("[8/11] Evaluating trained policy on test events...")
     
@@ -577,7 +567,7 @@ def main():
     print(f"       Actions: 0={test_results['action_0_count']}, 1={test_results['action_1_count']}\n")
 
     # ========================================================================
-    # 8. SIMULATE PROPOSED AMM ON TEST SET (NEW!)
+    # 8. SIMULATE PROPOSED AMM ON TEST SET
     # ========================================================================
     print("[9/11] Simulating proposed predictive AMM on test set...")
     
@@ -594,11 +584,10 @@ def main():
     proposed_metrics = compute_proposed_amm_metrics(proposed_result, price, x0*y0)
 
     # ========================================================================
-    # 9. BASELINE ON TEST SET (NEW!)
+    # 9. BASELINE ON TEST SET
     # ========================================================================
     print("[10/11] Running baseline (Uniswap V2) on test set...")
     
-    # Get test price series
     test_start_idx = test_events[0].t
     test_end_idx = test_events[-1].t
     test_price = price[test_start_idx:test_end_idx+1]
@@ -616,7 +605,7 @@ def main():
     print(f"       Load (mean): {baseline_metrics['load_mean']:.6e}\n")
 
     # ========================================================================
-    # 10. COMPARISON TABLE (NEW!)
+    # 10. COMPARISON TABLE
     # ========================================================================
     print("[11/11] Comparing proposed vs baseline...")
     print_comparison_table(baseline_metrics, proposed_metrics, len(test_trades))
@@ -703,19 +692,16 @@ def main():
     print("Diagnostic Checks:")
     print("-" * 80)
     
-    # Check 1: LSTM is learning
     if eval_metrics['r2'] > 0.5:
         print("✓ LSTM predictions are good (R² > 0.5)")
     else:
         print(f"⚠ LSTM predictions may be weak (R² = {eval_metrics['r2']:.3f})")
     
-    # Check 2: RL agent learned
     if test_results['mean_reward'] > -0.5:
         print("✓ RL agent learned a useful policy (test reward > -0.5)")
     else:
         print(f"⚠ RL agent may not have learned (test reward = {test_results['mean_reward']:.3f})")
     
-    # Check 3: Proposed improves over baseline
     if proposed_metrics['divergence_loss_mean'] < baseline_metrics['div_mean']:
         print("✓ Proposed AMM reduces divergence loss vs baseline")
     else:
@@ -726,7 +712,6 @@ def main():
     else:
         print("⚠ Proposed AMM does not reduce slippage loss")
     
-    # Check 4: Prediction quality
     if proposed_metrics['prediction_mae'] < 0.01:
         print(f"✓ LSTM predictions are accurate (MAE = {proposed_metrics['prediction_mae']:.6f})")
     else:
