@@ -322,6 +322,9 @@ class ImprovedRLEnv:
             self.loss_history = []
             self.epsilon_injections = []
         
+        print(f"[RL Env] Reset complete. Initial v={v0:.4f}, vpred={vpred:.4f}, "
+              f"events={len(self.events)}, threshold={self.cfg.beta_c_relative:.6f}")
+        
         return self._last_obs.copy()
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
@@ -344,12 +347,15 @@ class ImprovedRLEnv:
             ))
             self.current_epsilon = epsilon_injected
             
+            # Debug: print every 50th epsilon injection
             if self.epsilon_injections is not None:
                 self.epsilon_injections.append({
                     'step': self.idx,
                     'epsilon': epsilon_injected,
                     'v_now': v_now,
                 })
+                if len(self.epsilon_injections) % 50 == 1:
+                    print(f"[RL Env] ε injected (#{len(self.epsilon_injections)}): ε={epsilon_injected:+.4f} at v={v_now:.4f}")
         else:
             self.current_epsilon = 0.0
         
@@ -375,17 +381,17 @@ class ImprovedRLEnv:
         # Use adaptive threshold if enabled
         threshold = self.adaptive_threshold if self.cfg.use_adaptive_threshold else self.cfg.beta_c_relative
         
-        # Continuous reward (better for learning than discrete)
-        # Reward = -loss, clipped to [-1, 1]
-        reward = np.clip(-losses['total_rel'] / threshold, -1.0, 1.0)
+        # Discrete reward (paper-compliant per Algorithm 3)
+        # Paper's discrete reward function based on threshold β_c
+        if losses['total_rel'] < threshold:
+            reward = 1.0   # ℓ_t < β_c: good performance
+        elif losses['total_rel'] > threshold:
+            reward = -1.0  # ℓ_t > β_c: poor performance
+        else:
+            reward = 0.0   # ℓ_t = β_c: at threshold
         
-        # Alternative: discrete reward with adaptive threshold
-        # if losses['total_rel'] < threshold:
-        #     reward = 1.0
-        # elif losses['total_rel'] > threshold * 2:
-        #     reward = -1.0
-        # else:
-        #     reward = 0.0
+        # Alternative: continuous reward (previous improved version)
+        # reward = np.clip(-losses['total_rel'] / threshold, -1.0, 1.0)
         
         # ========== TRACK DIAGNOSTICS ==========
         if self.loss_history is not None:
@@ -452,6 +458,7 @@ class ImprovedRLEnv:
     def get_loss_stats(self) -> Dict[str, float]:
         """Return statistics on losses."""
         if not self.loss_history:
+            print("[RL Env] No loss history available.")
             return {}
         
         pred_errors = np.array([x['pred_error_rel'] for x in self.loss_history])
@@ -460,7 +467,7 @@ class ImprovedRLEnv:
         rewards = np.array([x['reward'] for x in self.loss_history])
         thresholds = np.array([x['threshold'] for x in self.loss_history])
         
-        return {
+        stats = {
             'pred_error_mean': float(np.mean(pred_errors)),
             'exp_load_mean': float(np.mean(exp_loads)),
             'total_loss_mean': float(np.mean(total_losses)),
@@ -469,6 +476,16 @@ class ImprovedRLEnv:
             'threshold_mean': float(np.mean(thresholds)),
             'below_threshold_ratio': float(np.mean(total_losses < thresholds)),
         }
+        
+        print(f"\n[RL Env] Loss Statistics ({len(self.loss_history)} steps):")
+        print(f"  Pred Error:  {stats['pred_error_mean']:.6f}")
+        print(f"  Exp Load:    {stats['exp_load_mean']:.6f}")
+        print(f"  Total Loss:  {stats['total_loss_mean']:.6f}")
+        print(f"  Reward Avg:  {stats['reward_mean']:+.4f}")
+        print(f"  Positive %:  {stats['reward_positive_ratio']:.2%}")
+        print(f"  Below Thresh: {stats['below_threshold_ratio']:.2%}")
+        
+        return stats
     
     @property
     def camm(self) -> ConfigurableAMM:

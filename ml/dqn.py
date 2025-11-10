@@ -114,14 +114,14 @@ class ReplayBuffer:
 # -------------------------- Q‑Network -------------------------------------------
 
 class DuelingQNet(nn.Module):
-    def __init__(self, state_dim: int, n_actions: int, hidden: int = 128):
+    def __init__(self, state_dim: int, n_actions: int, hidden: int = 100):
         super().__init__()
         self.backbone = nn.Sequential(
-            nn.Linear(state_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(state_dim, hidden), nn.LeakyReLU(0.01),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.01),
         )
-        self.val = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 1))
-        self.adv = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, n_actions))
+        self.val = nn.Sequential(nn.Linear(hidden, 50), nn.LeakyReLU(0.01), nn.Linear(50, 1))
+        self.adv = nn.Sequential(nn.Linear(hidden, 50), nn.LeakyReLU(0.01), nn.Linear(50, n_actions))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.backbone(x)
@@ -138,8 +138,8 @@ class DDQNConfig:
     gamma: float = 0.98
     lr: float = 1e-3
     weight_decay: float = 0.0
-    hidden: int = 128
-    batch_size: int = 256
+    hidden: int = 100
+    batch_size: int = 50
     buffer_size: int = 200_000
     min_buffer: int = 10_000
     train_freq: int = 1
@@ -271,6 +271,15 @@ def train(env, agent: DDQNAgent, steps: int = 200_000, warm_start_random: int = 
     • Performs environment interaction, fills replay, and optimizes online.
     • Uses epsilon‑greedy through agent.epsilon schedule.
     """
+    print(f"\n{'='*60}")
+    print(f"DQN Training Started")
+    print(f"{'='*60}")
+    print(f"Total steps: {steps:,}, Warm start: {warm_start_random:,}")
+    print(f"Actions: {agent.n_actions}, Device: {agent.device}")
+    print(f"Config: hidden={agent.cfg.hidden}, batch_size={agent.cfg.batch_size}, gamma={agent.cfg.gamma}")
+    print(f"Epsilon schedule: {agent.cfg.eps_start} → {agent.cfg.eps_end} over {agent.cfg.eps_decay_steps:,} steps")
+    print(f"{'='*60}\n")
+    
     s = env.reset()
     hist = {"loss": [], "td": [], "reward": []}
 
@@ -300,9 +309,33 @@ def train(env, agent: DDQNAgent, steps: int = 200_000, warm_start_random: int = 
             hist["td"].append(td)
         hist["reward"].append(r)
 
+        # Print progress every 10,000 steps
+        if t % 10_000 == 0:
+            recent_rewards = hist["reward"][-1000:] if len(hist["reward"]) >= 1000 else hist["reward"]
+            recent_loss = hist["loss"][-100:] if len(hist["loss"]) >= 100 else hist["loss"]
+            avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
+            avg_loss = np.mean(recent_loss) if recent_loss else 0.0
+            eps = agent.epsilon()
+            buf_size = len(agent.buf)
+            
+            print(f"Step {t:7,}/{steps:,} | ε={eps:.3f} | Buffer={buf_size:6,} | "
+                  f"Reward(1k)={avg_reward:+.3f} | Loss(100)={avg_loss:.4f}")
+
         s = sp
         if done:
             s = env.reset()
+
+    # Final summary
+    print(f"\n{'='*60}")
+    print(f"DQN Training Complete")
+    print(f"{'='*60}")
+    avg_reward = np.mean(hist["reward"][-1000:]) if len(hist["reward"]) >= 1000 else np.mean(hist["reward"])
+    avg_loss = np.mean(hist["loss"][-100:]) if len(hist["loss"]) >= 100 else np.mean(hist["loss"])
+    print(f"Final avg reward (last 1k): {avg_reward:+.4f}")
+    print(f"Final avg loss (last 100): {avg_loss:.6f}")
+    print(f"Total episodes: {hist['reward'].count(0) + 1}")
+    print(f"Buffer size: {len(agent.buf):,}")
+    print(f"{'='*60}\n")
 
     return hist
 

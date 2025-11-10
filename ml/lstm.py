@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 # -------------------------- model -----------------------------------------------
 
 class LSTMPredictor(nn.Module):
-    def __init__(self, in_dim: int, hidden: int = 128, num_layers: int = 1, dropout: float = 0.0):
+    def __init__(self, in_dim: int, hidden: int = 100, num_layers: int = 1, dropout: float = 0.0):
         super().__init__()
         self.lstm = nn.LSTM(input_size=in_dim, hidden_size=hidden, num_layers=num_layers,
                             dropout=(dropout if num_layers > 1 else 0.0), batch_first=True)
@@ -63,11 +63,11 @@ class SeqDataset(Dataset):
 
 @dataclass
 class TrainConfig:
-    epochs: int = 40
-    batch_size: int = 256
+    epochs: int = 50
+    batch_size: int = 50
     lr: float = 1e-3
     weight_decay: float = 0.0
-    hidden: int = 128
+    hidden: int = 100
     num_layers: int = 1
     dropout: float = 0.0
     patience: int = 6
@@ -105,6 +105,16 @@ def fit(
     model = _make_model(in_dim=X_train.shape[-1], cfg=cfg).to(cfg.device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     loss_fn = nn.MSELoss()
+
+    # Debug info
+    print(f"\n{'='*60}")
+    print(f"LSTM Training Started")
+    print(f"{'='*60}")
+    print(f"Train samples: {len(X_train)}, Val samples: {len(X_val) if has_val else 0}")
+    print(f"Input shape: {X_train.shape}, Feature dim: {X_train.shape[-1]}")
+    print(f"Config: hidden={cfg.hidden}, epochs={cfg.epochs}, batch_size={cfg.batch_size}")
+    print(f"Device: {cfg.device}, LR: {cfg.lr}")
+    print(f"{'='*60}\n")
 
     history = {"train_loss": [], "val_loss": []}
     best_val = float("inf")
@@ -145,6 +155,11 @@ def fit(
             val_loss = tot_v / max(1, m)
             history["val_loss"].append(val_loss)
             improved = val_loss < best_val - 1e-8
+            
+            # Print progress
+            status = "✓ IMPROVED" if improved else f"  (patience: {patience_left})"
+            print(f"Epoch {epoch+1:3d}/{cfg.epochs} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | {status}")
+            
             if improved:
                 best_val = val_loss
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
@@ -152,13 +167,24 @@ def fit(
             else:
                 patience_left -= 1
                 if patience_left <= 0:
+                    print(f"\n⚠ Early stopping triggered at epoch {epoch+1}")
                     break
         else:
             # no val: just keep updating best
+            print(f"Epoch {epoch+1:3d}/{cfg.epochs} | Train Loss: {train_loss:.6f}")
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    
+    # Final summary
+    print(f"\n{'='*60}")
+    print(f"LSTM Training Complete")
+    print(f"{'='*60}")
+    print(f"Best validation loss: {best_val:.6f}" if has_val else f"Final train loss: {history['train_loss'][-1]:.6f}")
+    print(f"Total epochs trained: {len(history['train_loss'])}")
+    print(f"{'='*60}\n")
+    
     return model, history
 
 # -------------------------- evaluation ------------------------------------------
@@ -166,6 +192,9 @@ def fit(
 def evaluate(model: LSTMPredictor, X: np.ndarray, y: np.ndarray, device: Optional[str] = None) -> Dict[str, float]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"\n[LSTM Evaluate] Evaluating on {len(X)} samples...")
+    
     ds = SeqDataset(X, y)
     dl = DataLoader(ds, batch_size=512, shuffle=False)
     loss_fn = nn.MSELoss()
@@ -189,13 +218,20 @@ def evaluate(model: LSTMPredictor, X: np.ndarray, y: np.ndarray, device: Optiona
     ss_res = float(np.sum((yhat - y) ** 2))
     ss_tot = float(np.sum((y - float(np.mean(y))) ** 2)) + 1e-12
     r2 = 1.0 - ss_res / ss_tot
-    return {"mse": mse, "mae": mae, "r2": r2}
+    
+    result = {"mse": mse, "mae": mae, "r2": r2}
+    print(f"[LSTM Evaluate] MSE: {mse:.6f}, MAE: {mae:.6f}, R²: {r2:.4f}")
+    
+    return result
 
 # -------------------------- inference -------------------------------------------
 
 def predict(model: LSTMPredictor, X: np.ndarray, device: Optional[str] = None) -> np.ndarray:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"[LSTM Predict] Predicting on {len(X)} samples...")
+    
     model = model.to(device)
     model.eval()
     X_t = torch.as_tensor(X, dtype=torch.float32)
@@ -206,7 +242,13 @@ def predict(model: LSTMPredictor, X: np.ndarray, device: Optional[str] = None) -
             xb = xb.to(device)
             pred = model(xb)
             preds.append(pred.cpu().numpy())
-    return np.concatenate(preds) if preds else np.zeros((0,))
+    
+    result = np.concatenate(preds) if preds else np.zeros((0,))
+    
+    if len(result) > 0:
+        print(f"[LSTM Predict] Complete. Predictions range: [{result.min():.4f}, {result.max():.4f}], mean: {result.mean():.4f}")
+    
+    return result
 
 # -------------------------- save/load -------------------------------------------
 
@@ -215,7 +257,7 @@ def save_model(model: LSTMPredictor, path: str, meta: Optional[Dict] = None) -> 
     torch.save(obj, path)
 
 
-def load_model(path: str, in_dim: int, hidden: int = 128, num_layers: int = 1, dropout: float = 0.0) -> Tuple[LSTMPredictor, Dict]:
+def load_model(path: str, in_dim: int, hidden: int = 100, num_layers: int = 1, dropout: float = 0.0) -> Tuple[LSTMPredictor, Dict]:
     obj = torch.load(path, map_location="cpu")
     model = LSTMPredictor(in_dim=in_dim, hidden=hidden, num_layers=num_layers, dropout=dropout)
     model.load_state_dict(obj["state_dict"])  # type: ignore
