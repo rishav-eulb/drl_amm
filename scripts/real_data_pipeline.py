@@ -56,7 +56,7 @@ from ml.lstm import (
     predict as lstm_predict,
     LSTMPredictor,
 )
-from ml.rl_env import RLEnv, RLEnvConfig
+from ml.rl_env import ImprovedRLEnv, RLEnvConfig
 from ml.dqn import DDQNConfig, DDQNAgent, train as dqn_train
 from amm.camm import ConfigurableAMM
 from amm.maths import divergence_loss, slippage_loss_X, load_auto
@@ -158,7 +158,7 @@ def split_events_train_test(events: List[Event], train_ratio: float = 0.8) -> Tu
 # EVALUATION FUNCTIONS
 # ============================================================================
 
-def evaluate_rl_policy(env: RLEnv, agent: DDQNAgent, max_steps: int = 10000) -> Dict:
+def evaluate_rl_policy(env, agent: DDQNAgent, max_steps: int = 10000) -> Dict:
     """Evaluate trained policy on test environment (greedy, no exploration)."""
     # Save original epsilon
     old_eps_start = agent.cfg.eps_start
@@ -247,13 +247,13 @@ def simulate_predictive_amm(
         pred_eps = float(lstm_predict(lstm_model, w)[0])
         pred_eps = np.clip(pred_eps, 1e-6, 1.0 - 1e-6)
         pred_hist.append(pred_eps)
-        val_hist.append(ev.target_valuation)
+        val_hist.append(ev.v)
         
         # Agent decides epsilon
         state = np.array([
             amm.x, amm.y,
             pred_eps,
-            ev.target_valuation,
+            ev.v,
             float(drift_x[-1]),
             float(drift_y[-1]),
             amm.x * amm.y,
@@ -265,7 +265,7 @@ def simulate_predictive_amm(
         
         # Update AMM
         c_old = amm.x * amm.y
-        amm.shift(epsilon, ev.target_valuation)
+        amm.shift(epsilon, ev.v)
         c_new = amm.x * amm.y
         
         x_hist.append(amm.x)
@@ -374,15 +374,9 @@ def setup_and_train_rl_improved(
 ):
     """Improved RL training with scale-invariant environment."""
     
-    # Try to import improved environment, fall back to standard if not available
-    try:
-        from ml.rl_env_improved import ImprovedRLEnv, RLEnvConfig as ImprovedRLEnvConfig
-        use_improved = True
-        print("[6/11] Setting up IMPROVED RL environment (scale-invariant)...")
-    except ImportError:
-        print("[6/11] ImprovedRLEnv not found, using standard RLEnv...")
-        print("       Note: Install rl_env_improved.py for better results")
-        use_improved = False
+    # Use the improved environment from ml.rl_env
+    from ml.rl_env import ImprovedRLEnv, RLEnvConfig
+    print("[6/11] Setting up IMPROVED RL environment (scale-invariant)...")
     
     from ml.dqn import DDQNAgent, DDQNConfig, train as dqn_train
     from amm.camm import ConfigurableAMM
@@ -419,60 +413,43 @@ def setup_and_train_rl_improved(
         return float(np.clip(out[0], 1e-6, 1.0 - 1e-6))
     
     # ========== CONFIGURE RL ENVIRONMENT ==========
-    if use_improved:
-        # IMPROVED: Scale-invariant configuration
-        cfg_rl = ImprovedRLEnvConfig(
-            # Scale-invariant thresholds
-            beta_c_relative=0.0001,        # 0.01% relative loss threshold
-            prediction_weight=0.5,          # Balance prediction vs market-making
-            
-            # Adaptive threshold based on market volatility
-            use_adaptive_threshold=True,
-            volatility_window=100,
-            vol_multiplier=2.0,
-            
-            # Epsilon parameters
-            mu_epsilon=args.mu_epsilon,
-            sigma_epsilon=args.sigma_epsilon,
-            
-            # Other parameters
-            samples_per_step=16,
-            sigma_noise=0.02,
-            lstm_win=args.lstm_win,
-            seed=args.seed,
-            track_losses=True,
-            
-            # Feature processing
-            normalize_reserves=True,
-            use_log_reserves=True,  # Better for neural networks
-        )
-        state_dim = 8  # Updated state dimension for improved env
-    else:
-        # STANDARD: Original configuration
-        cfg_rl = RLEnvConfig(
-            beta_c=args.beta_c, 
-            sigma_noise=0.02,
-            mu_epsilon=args.mu_epsilon,
-            sigma_epsilon=args.sigma_epsilon,
-            samples_per_step=16,
-            lstm_win=args.lstm_win, 
-            seed=args.seed,
-            use_concentrated_liquidity=False,
-        )
-        state_dim = 7  # Original state dimension
+    # IMPROVED: Scale-invariant configuration
+    cfg_rl = RLEnvConfig(
+        # Scale-invariant thresholds
+        beta_c_relative=args.beta_c,        # Loss threshold from args
+        prediction_weight=0.5,               # Balance prediction vs market-making
+        
+        # Adaptive threshold based on market volatility
+        use_adaptive_threshold=True,
+        volatility_window=100,
+        vol_multiplier=2.0,
+        
+        # Epsilon parameters
+        mu_epsilon=args.mu_epsilon,
+        sigma_epsilon=args.sigma_epsilon,
+        
+        # Other parameters
+        samples_per_step=16,
+        sigma_noise=0.02,
+        lstm_win=args.lstm_win,
+        seed=args.seed,
+        track_losses=True,
+        
+        # Feature processing
+        normalize_reserves=True,
+        use_log_reserves=True,  # Better for neural networks
+    )
+    state_dim = 8  # Updated state dimension for improved env
     
     # ========== CREATE TRAINING ENVIRONMENT ==========
-    if use_improved:
-        train_env = ImprovedRLEnv(
-            cfg_rl,
-            train_events,
-            camm_init,
-            lstm_pred_fn,
-            window_init,
-            price_series=price  # Pass full price series for volatility
-        )
-    else:
-        train_env = RLEnv(cfg_rl, train_events, camm_init, lstm_pred_fn, window_init)
+    train_env = ImprovedRLEnv(
+        cfg_rl,
+        train_events,
+        camm_init,
+        lstm_pred_fn,
+        window_init,
+        price_series=price  # Pass full price series for volatility
+    )
     
     print("[7/11] Training DD-DQN agent...")
     
@@ -483,8 +460,8 @@ def setup_and_train_rl_improved(
         cfg=DDQNConfig(
             gamma=args.rl_gamma,
             lr=5e-4,  # Slightly lower learning rate for improved
-            hidden=256,  # Larger network for complex patterns
-            batch_size=256,
+            hidden=100,  # Paper-compliant: 100 neurons
+            batch_size=50,  # Paper-compliant: batch size 50
             buffer_size=args.rl_buffer,
             min_buffer=5_000,
             train_freq=1,
@@ -513,7 +490,7 @@ def setup_and_train_rl_improved(
     print(f"       Positive %: {positive_ratio:.2%}")
     
     # Get training statistics if improved env
-    if use_improved and hasattr(train_env, 'get_loss_stats'):
+    if hasattr(train_env, 'get_loss_stats'):
         train_stats = train_env.get_loss_stats()
         print(f"       Mean relative loss: {train_stats.get('total_loss_mean', 0):.6f}")
         print(f"       Below threshold %: {train_stats.get('below_threshold_ratio', 0):.2%}")
@@ -522,23 +499,14 @@ def setup_and_train_rl_improved(
     # ========== EVALUATE ON TEST SET ==========
     print("[8/11] Evaluating on test events...")
     
-    if use_improved:
-        test_env = ImprovedRLEnv(
-            cfg_rl,
-            test_events,
-            ConfigurableAMM(x=x0, y=y0, name="cAMM_test"),
-            lstm_pred_fn,
-            window_init,
-            price_series=price
-        )
-    else:
-        test_env = RLEnv(
-            cfg_rl,
-            test_events,
-            ConfigurableAMM(x=x0, y=y0, name="cAMM_test"),
-            lstm_pred_fn,
-            window_init
-        )
+    test_env = ImprovedRLEnv(
+        cfg_rl,
+        test_events,
+        ConfigurableAMM(x=x0, y=y0, name="cAMM_test"),
+        lstm_pred_fn,
+        window_init,
+        price_series=price
+    )
     
     test_results = evaluate_rl_policy(test_env, agent, max_steps=len(test_events))
     
@@ -547,7 +515,7 @@ def setup_and_train_rl_improved(
     print(f"       Test mean loss: {test_results['mean_loss']:.6f}")
     
     # Get test statistics if improved env
-    if use_improved and hasattr(test_env, 'get_loss_stats'):
+    if hasattr(test_env, 'get_loss_stats'):
         test_stats = test_env.get_loss_stats()
         print(f"       Test relative loss: {test_stats.get('total_loss_mean', 0):.6f}")
     
@@ -588,10 +556,10 @@ def parse_args():
     # LSTM
     parser.add_argument("--lstm_win", type=int, default=50,
                        help="LSTM window size (paper: 50)")
-    parser.add_argument("--lstm_hidden", type=int, default=128,
-                       help="LSTM hidden units (paper: 128)")
-    parser.add_argument("--lstm_batch", type=int, default=256,
-                       help="LSTM batch size (paper: 256)")
+    parser.add_argument("--lstm_hidden", type=int, default=100,
+                       help="LSTM hidden units (paper: 100)")
+    parser.add_argument("--lstm_batch", type=int, default=50,
+                       help="LSTM batch size (paper: 50)")
     parser.add_argument("--lookahead", type=int, default=1,
                        help="Prediction lookahead (paper: 1)")
     parser.add_argument("--epochs", type=int, default=50,
