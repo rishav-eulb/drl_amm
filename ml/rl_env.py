@@ -6,6 +6,7 @@ FIXES APPLIED:
 2. Window updates: properly rolls forward with new market data
 3. Feature extraction: maintains feature history for LSTM
 4. Epsilon history: properly tracked and used
+5. **NEW FIX**: Epsilon augmentation now REPLACES last column instead of adding
 
 State s_t (7 dimensions):
   • v_t            : current valuation in (0,1)
@@ -98,7 +99,7 @@ class RLEnv:
         lstm_predict : callable
             Function: window[T, D] -> v'_p (predicted valuation)
         window_init : np.ndarray
-            Initial feature window [lstm_win, D] (without epsilon column)
+            Initial feature window [lstm_win, D] (INCLUDES epsilon column as last column)
         full_feature_array : np.ndarray, optional
             Full feature array [T, D] aligned with events for window updates
         """
@@ -204,18 +205,20 @@ class RLEnv:
         return v_samp
     
     def _augment_window_with_epsilon(self, window: np.ndarray, epsilon: float) -> np.ndarray:
-        """Add ε as additional feature column to LSTM window.
+        """Update ε column in LSTM window (last column).
         
         Paper (Algorithm 3, line 5):
         "Read the market price v'_obs, external signals τ_t, and Gaussian input parameter ε"
         
-        This creates augmented input: [v_obs, τ, ε]
-        """
-        # Create epsilon column matching window length
-        eps_col = np.full((window.shape[0], 1), epsilon, dtype=float)
+        The window already has epsilon as the last column (set to 0 during training).
+        This method replaces it with the injected value.
         
-        # Concatenate to existing features
-        augmented = np.concatenate([window, eps_col], axis=1)
+        **FIX**: Previously this added a new column, causing dimension mismatch.
+        Now it replaces the existing epsilon column (last column).
+        """
+        # Copy window and replace last column (epsilon) with new value
+        augmented = window.copy()
+        augmented[:, -1] = epsilon
         return augmented
     
     def _extract_features_at_event(self, event_idx: int) -> np.ndarray:
@@ -284,6 +287,7 @@ class RLEnv:
         1. Agent freely chooses action (no gating on loss)
         2. Window properly updates with new features
         3. Epsilon injection logic simplified
+        4. **NEW**: Epsilon augmentation replaces last column instead of adding
         
         Parameters
         ----------
@@ -504,15 +508,15 @@ if __name__ == "__main__":
 
     # Dummy LSTM predictor
     def dummy_pred(win: np.ndarray) -> float:
-        # Win has shape [T, D+1] where last column is ε
+        # Win has shape [T, D] where last column is ε
         x = win[:, 0] if win.shape[1] > 1 else win[:, 0]
         epsilon_effect = win[:, -1].mean() if win.shape[1] > 1 else 0.0
         base_pred = 1 / (1 + np.exp(-x.mean()))
         # ε shifts prediction slightly
         return float(np.clip(base_pred + 0.1 * epsilon_effect, 0.01, 0.99))
 
-    # Initial window (D=4 features)
-    window_init = np.random.randn(50, 4) * 0.1
+    # Initial window (D=4 features + 1 epsilon = 5 total)
+    window_init = np.random.randn(50, 5) * 0.1
 
     # Create environment
     cfg = RLEnvConfig(
@@ -574,4 +578,5 @@ if __name__ == "__main__":
     print("✓ Action 1 now freely chosen by agent (no gating)")
     print("✓ Window properly updates with new features")
     print("✓ State is 7D including current ε value")
+    print("✓ Epsilon dimension fix: replaces last column instead of adding")
     print("="*70)
